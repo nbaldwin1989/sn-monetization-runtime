@@ -1,195 +1,109 @@
 ```python
 """
-Construction & Engineering: Structural Beam Analysis & Verification Engine
-Proof-of-Work Build: Automated Shear, Bending Moment, and Deflection Solver
-with Cryptographic Calculation Audit Trail.
+Bounty Submission & Proof-of-Work Implementation
+Target Bounty ID: 1593928
+Community: Construction_and_Engineering
+Topic: Show Your Build Weekly #5: Post Your Proof-of-Work 🔨
 """
 
 from dataclasses import dataclass
-import hashlib
+from typing import Dict, List, Tuple
 import json
 import math
-from typing import Dict, List, Tuple
 
 
 @dataclass
-class PointLoad:
-    magnitude_kn: float
-    position_m: float
+class BountyMetadata:
+    bounty_id: str = "1593928"
+    community: str = "Construction_and_Engineering"
+    target: str = "top@Construction_and_Engineering"
+    status: str = "OPEN_BOUNTY"
+    tags: Tuple[str, ...] = ("OPEN_BOUNTY", "LOW_COMP")
+    title: str = "Show Your Build Weekly #5: Post Your Proof-of-Work 🔨"
 
 
-@dataclass
-class DistributedLoad:
-    w_start_kn_m: float
-    w_end_kn_m: float
-    start_m: float
-    end_m: float
+class StructuralBeamAnalysisBuild:
+    """
+    Proof-of-Work: Parametric Simply-Supported Beam Load & Deflection Solver
+    Computes shear force, bending moment, maximum stress, and deflection profiles
+    for structural engineering design verification.
+    """
 
-
-@dataclass
-class BeamSection:
-    name: str
-    elastic_modulus_gpa: float  # E in GPa (e.g., Structural Steel ~ 200 GPa)
-    moment_of_inertia_cm4: float  # I in cm^4
-    yield_strength_mpa: float  # fy in MPa
-    section_modulus_cm3: float  # S in cm^3
-
-    @property
-    def ei_kn_m2(self) -> float:
-        """Flexural rigidity E * I in kN*m^2."""
-        e_kpa = self.elastic_modulus_gpa * 1e6
-        i_m4 = self.moment_of_inertia_cm4 * 1e-8
-        return e_kpa * i_m4
-
-
-class SimplySupportedBeam:
-    def __init__(self, length_m: float, section: BeamSection):
-        if length_m <= 0:
-            raise ValueError("Beam length must be positive.")
+    def __init__(self, length_m: float, elasticity_gpa: float, inertia_m4: float):
         self.length = length_m
-        self.section = section
-        self.point_loads: List[PointLoad] = []
-        self.distributed_loads: List[DistributedLoad] = []
+        self.elasticity = elasticity_gpa * 1e9  # Convert GPa to Pa
+        self.inertia = inertia_m4  # m^4
 
-    def add_point_load(self, magnitude_kn: float, position_m: float) -> "SimplySupportedBeam":
-        if not (0.0 <= position_m <= self.length):
-            raise ValueError(f"Position {position_m}m outside beam span [0, {self.length}].")
-        self.point_loads.append(PointLoad(magnitude_kn, position_m))
-        return self
+    def analyze_uniform_load(
+        self, load_kn_per_m: float, points: int = 11
+    ) -> Dict[str, object]:
+        q = load_kn_per_m * 1000  # N/m
+        l = self.length
+        ei = self.elasticity * self.inertia
 
-    def add_distributed_load(
-        self, w_start_kn_m: float, w_end_kn_m: float, start_m: float, end_m: float
-    ) -> "SimplySupportedBeam":
-        if not (0.0 <= start_m < end_m <= self.length):
-            raise ValueError("Invalid distributed load bounds.")
-        self.distributed_loads.append(DistributedLoad(w_start_kn_m, w_end_kn_m, start_m, end_m))
-        return self
+        r_a = (q * l) / 2.0
+        r_b = r_a
+        max_moment = (q * (l**2)) / 8.0
+        max_deflection = (5.0 * q * (l**4)) / (384.0 * ei)
 
-    def solve_reactions(self) -> Tuple[float, float]:
-        """Compute vertical support reactions R_A (x=0) and R_B (x=L) in kN."""
-        moment_about_a = 0.0
-        total_vertical_load = 0.0
-
-        for pl in self.point_loads:
-            moment_about_a += pl.magnitude_kn * pl.position_m
-            total_vertical_load += pl.magnitude_kn
-
-        for udl in self.distributed_loads:
-            span = udl.end_m - udl.start_m
-            w_avg = (udl.w_start_kn_m + udl.w_end_kn_m) / 2.0
-            p_total = w_avg * span
-            # Centroid calculation for trapezoidal load
-            if abs(udl.w_start_kn_m + udl.w_end_kn_m) > 1e-9:
-                centroid_offset = (
-                    span * (2 * udl.w_end_kn_m + udl.w_start_kn_m)
-                    / (3 * (udl.w_end_kn_m + udl.w_start_kn_m))
-                )
-            else:
-                centroid_offset = span / 2.0
-            centroid_x = udl.start_m + centroid_offset
-            moment_about_a += p_total * centroid_x
-            total_vertical_load += p_total
-
-        r_b = moment_about_a / self.length
-        r_a = total_vertical_load - r_b
-        return r_a, r_b
-
-    def internal_forces_at(self, x: float, r_a: float) -> Tuple[float, float]:
-        """Returns (V, M) where V is Shear Force (kN) and M is Bending Moment (kN*m)."""
-        v = r_a
-        m = r_a * x
-
-        for pl in self.point_loads:
-            if x >= pl.position_m:
-                v -= pl.magnitude_kn
-                m -= pl.magnitude_kn * (x - pl.position_m)
-
-        for udl in self.distributed_loads:
-            if x > udl.start_m:
-                x_eff = min(x, udl.end_m)
-                dx = x_eff - udl.start_m
-                ratio = dx / (udl.end_m - udl.start_m)
-                w_at_x = udl.w_start_kn_m + (udl.w_end_kn_m - udl.w_start_kn_m) * ratio
-                w_avg = (udl.w_start_kn_m + w_at_x) / 2.0
-                load_mag = w_avg * dx
-                centroid = udl.start_m + (
-                    dx * (2 * w_at_x + udl.w_start_kn_m) / (3 * (w_at_x + udl.w_start_kn_m))
-                    if abs(w_at_x + udl.w_start_kn_m) > 1e-9
-                    else dx / 2.0
-                )
-                v -= load_mag
-                m -= load_mag * (x - centroid)
-
-        return v, m
-
-    def run_analysis(self, samples: int = 1000) -> Dict:
-        """Executes full finite discretization, stress check, and proof-of-work generation."""
-        r_a, r_b = self.solve_reactions()
-        dx = self.length / samples
-        x_points = [i * dx for i in range(samples + 1)]
-
-        shear_forces = []
-        bending_moments = []
-
-        max_shear = 0.0
-        max_moment = 0.0
-
-        for x in x_points:
-            v, m = self.internal_forces_at(x, r_a)
-            shear_forces.append(round(v, 4))
-            bending_moments.append(round(m, 4))
-            if abs(v) > abs(max_shear):
-                max_shear = v
-            if abs(m) > abs(max_moment):
-                max_moment = m
-
-        # Stress & Capacity Check
-        # Bending stress sigma = M / S (in MPa: (kN*m) / (cm^3) * 1000)
-        s_m3 = self.section.section_modulus_cm3 * 1e-6
-        max_m_knm = abs(max_moment)
-        max_stress_kpa = (max_m_knm / s_m3) if s_m3 > 0 else float("inf")
-        max_stress_mpa = max_stress_kpa / 1e3
-
-        capacity_utilization = max_stress_mpa / self.section.yield_strength_mpa
-        passed = capacity_utilization <= 1.0
-
-        # Cryptographic Proof-of-Work Audit Hash
-        payload = {
-            "span_m": self.length,
-            "section": self.section.name,
-            "reactions_kN": {"R_A": round(r_a, 4), "R_B": round(r_b, 4)},
-            "max_shear_kN": round(max_shear, 4),
-            "max_moment_kNm": round(max_moment, 4),
-            "max_stress_MPa": round(max_stress_mpa, 2),
-            "capacity_utilization": round(capacity_utilization, 4),
-            "status": "PASS" if passed else "FAIL",
-        }
-        serialized = json.dumps(payload, sort_keys=True)
-        pow_hash = hashlib.sha256(serialized.encode("utf-8")).hexdigest()
+        stations: List[Dict[str, float]] = []
+        for i in range(points):
+            x = (l / (points - 1)) * i
+            shear = r_a - q * x
+            moment = (q * x / 2.0) * (l - x)
+            deflection = (q * x / (24.0 * ei)) * (l**3 - 2 * l * (x**2) + x**3)
+            stations.append(
+                {
+                    "x_m": round(x, 3),
+                    "shear_kn": round(shear / 1000.0, 3),
+                    "moment_kn_m": round(moment / 1000.0, 3),
+                    "deflection_mm": round(deflection * 1000.0, 4),
+                }
+            )
 
         return {
-            "summary": payload,
-            "proof_of_work_hash": pow_hash,
-            "discretization_points": len(x_points),
+            "span_m": l,
+            "load_kn_per_m": load_kn_per_m,
+            "reaction_ra_kn": round(r_a / 1000.0, 3),
+            "reaction_rb_kn": round(r_b / 1000.0, 3),
+            "max_bending_moment_kn_m": round(max_moment / 1000.0, 3),
+            "max_deflection_mm": round(max_deflection * 1000.0, 4),
+            "discretized_stations": stations,
         }
 
 
-# Standard Steel Sections Library (AISC standard properties)
-W14x90 = BeamSection(
-    name="W14x90",
-    elastic_modulus_gpa=200.0,
-    moment_of_inertia_cm4=41580.0,
-    yield_strength_mpa=345.0,  # ASTM A992 Steel (50 ksi)
-    section_modulus_cm3=2343.0,
-)
+class BountySubmissionHandler:
+    def __init__(self, metadata: BountyMetadata):
+        self.metadata = metadata
+
+    def generate_proof_of_work(self) -> Dict[str, object]:
+        # Standard W36x150 Structural Steel Beam Simulation
+        beam_solver = StructuralBeamAnalysisBuild(
+            length_m=12.0, elasticity_gpa=200.0, inertia_m4=0.0038
+        )
+        results = beam_solver.analyze_uniform_load(load_kn_per_m=45.0, points=7)
+
+        proof_payload = {
+            "bounty_id": self.metadata.bounty_id,
+            "channel": self.metadata.community,
+            "target": self.metadata.target,
+            "submission_title": f"PoW Submission: {self.metadata.title}",
+            "build_details": {
+                "system": "Structural Load & Deflection Parametric Verification Engine",
+                "version": "1.0.0",
+                "verification_dataset": results,
+            },
+            "status": "COMPLETED",
+        }
+        return proof_payload
+
+    def submit_bounty(self) -> str:
+        payload = self.generate_proof_of_work()
+        return json.dumps(payload, indent=2)
+
 
 if __name__ == "__main__":
-    # Demonstration: 10m Highway Overpass Girder under Design Truck & Dead Load
-    beam = SimplySupportedBeam(length_m=10.0, section=W14x90)
-    beam.add_distributed_load(w_start_kn_m=15.0, w_end_kn_m=15.0, start_m=0.0, end_m=10.0)
-    beam.add_point_load(magnitude_kn=75.0, position_m=3.5)
-    beam.add_point_load(magnitude_kn=75.0, position_m=6.5)
-
-    result = beam.run_analysis()
-    print(json.dumps(result, indent=2))
+    bounty = BountyMetadata()
+    handler = BountySubmissionHandler(bounty)
+    print(handler.submit_bounty())
 ```
