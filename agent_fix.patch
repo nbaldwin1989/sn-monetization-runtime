@@ -1,328 +1,343 @@
 ```python
 """
-Construction & Engineering Analysis & Verification Engine
-Build #5: Structural Beam Analysis, CPM Project Scheduler, and Cryptographic Proof-of-Work (PoW)
+Construction & Engineering Proof-of-Work Toolkit
+Module: structural_and_project_engine.py
+
+Provides:
+1. Structural Beam Analysis (Shear, Bending Moment, Deflection, AISC stress check)
+2. Construction CPM (Critical Path Method) Schedule Engine
+3. Earthwork Quantity Takeoff (Cut & Fill via Average End Area Method)
 """
 
 from dataclasses import dataclass, field
-import hashlib
-import json
+from typing import Dict, List, Set, Tuple
 import math
-import time
-from typing import Dict, List, Optional, Tuple
 
 
-# =====================================================================
-# 1. STRUCTURAL ENGINEERING ANALYSIS MODULE
-# =====================================================================
-
-@dataclass
-class CrossSection:
-    """Cross-sectional geometry properties for structural members."""
-    name: str
-    area: float  # m^2
-    moment_of_inertia_z: float  # m^4 (strong axis)
-    elastic_modulus: float  # Pa (N/m^2), e.g., Steel = 210 GPa (210e9)
-    yield_strength: float  # Pa, e.g., A36 Steel = 250 MPa (250e6)
-    depth: float  # m
-
+# ============================================================================
+# 1. STRUCTURAL ANALYSIS ENGINE
+# ============================================================================
 
 @dataclass
 class PointLoad:
-    magnitude: float  # N (positive downwards)
-    position: float  # m from left support
+    magnitude_kn: float  # Downward force in kN
+    position_m: float    # Distance from left support in meters
 
 
 @dataclass
-class UniformLoad:
-    magnitude: float  # N/m (positive downwards)
-    start: float  # m from left support
-    end: float  # m from left support
+class DistributedLoad:
+    magnitude_kn_m: float  # Uniformly distributed load in kN/m
+    start_m: float
+    end_m: float
 
 
-class StructuralBeamAnalyzer:
-    """
-    Analyzes simply supported beams subject to point loads and distributed loads.
-    Calculates support reactions, shear forces, bending moments, maximum deflection,
-    and stress compliance according to standard limit-state principles.
-    """
+@dataclass
+class BeamSection:
+    depth_mm: float
+    flange_width_mm: float
+    web_thickness_mm: float
+    flange_thickness_mm: float
+    elastic_modulus_gpa: float = 200.0  # Structural Steel (GPa)
+    yield_strength_mpa: float = 355.0   # S355 / Grade 50 (MPa)
 
-    def __init__(self, span_length: float, section: CrossSection):
-        if span_length <= 0:
-            raise ValueError("Span length must be greater than zero.")
-        self.length = span_length
+    @property
+    def moment_of_inertia_x_mm4(self) -> float:
+        """Second moment of area (Ix) about strong axis for I-shaped section."""
+        d = self.depth_mm
+        bf = self.flange_width_mm
+        tw = self.web_thickness_mm
+        tf = self.flange_thickness_mm
+        hw = d - 2 * tf
+        # Ix = (bf * d^3 - (bf - tw) * hw^3) / 12
+        return (bf * (d ** 3) - (bf - tw) * (hw ** 3)) / 12.0
+
+    @property
+    def elastic_section_modulus_mm3(self) -> float:
+        return self.moment_of_inertia_x_mm4 / (self.depth_mm / 2.0)
+
+
+class SimplySupportedBeam:
+    """Analyzes simply supported beam under point and distributed loads."""
+
+    def __init__(self, length_m: float, section: BeamSection):
+        self.length = length_m
         self.section = section
         self.point_loads: List[PointLoad] = []
-        self.uniform_loads: List[UniformLoad] = []
+        self.distributed_loads: List[DistributedLoad] = []
 
-    def add_point_load(self, magnitude: float, position: float) -> None:
-        if not (0 <= position <= self.length):
-            raise ValueError(f"Load position {position}m is outside beam span [0, {self.length}]m.")
-        self.point_loads.append(PointLoad(magnitude, position))
+    def add_point_load(self, magnitude_kn: float, position_m: float):
+        if not (0.0 <= position_m <= self.length):
+            raise ValueError(f"Position {position_m}m outside beam length {self.length}m")
+        self.point_loads.append(PointLoad(magnitude_kn, position_m))
 
-    def add_uniform_load(self, magnitude: float, start: float, end: float) -> None:
-        if not (0 <= start < end <= self.length):
-            raise ValueError(f"Load bounds [{start}, {end}] must be within [0, {self.length}]m.")
-        self.uniform_loads.append(UniformLoad(magnitude, start, end))
+    def add_distributed_load(self, magnitude_kn_m: float, start_m: float, end_m: float):
+        if not (0.0 <= start_m <= end_m <= self.length):
+            raise ValueError("Load boundaries must fall within beam span.")
+        self.distributed_loads.append(DistributedLoad(magnitude_kn_m, start_m, end_m))
 
-    def calculate_reactions(self) -> Tuple[float, float]:
-        """Calculates vertical reaction forces at left (R_A) and right (R_B) supports."""
-        moment_at_a = 0.0
+    def compute_reactions(self) -> Tuple[float, float]:
+        """Calculates vertical reaction forces R_left (R1) and R_right (R2) in kN."""
+        moment_about_r1 = 0.0
         total_load = 0.0
 
         for pl in self.point_loads:
-            total_load += pl.magnitude
-            moment_at_a += pl.magnitude * pl.position
+            total_load += pl.magnitude_kn
+            moment_about_r1 += pl.magnitude_kn * pl.position_m
 
-        for udl in self.uniform_loads:
-            udl_total = udl.magnitude * (udl.end - udl.start)
-            udl_centroid = (udl.start + udl.end) / 2.0
-            total_load += udl_total
-            moment_at_a += udl_total * udl_centroid
+        for udl in self.distributed_loads:
+            w = udl.magnitude_kn_m
+            span = udl.end_m - udl.start_m
+            load = w * span
+            centroid = udl.start_m + span / 2.0
+            total_load += load
+            moment_about_r1 += load * centroid
 
-        reaction_b = moment_at_a / self.length
-        reaction_a = total_load - reaction_b
-        return reaction_a, reaction_b
+        r2 = moment_about_r1 / self.length
+        r1 = total_load - r2
+        return r1, r2
 
-    def calculate_internal_forces(self, x: float) -> Tuple[float, float]:
-        """Calculates shear force V(x) and bending moment M(x) at distance x."""
-        if not (0 <= x <= self.length):
-            raise ValueError(f"Position x={x} is out of bounds.")
-
-        reaction_a, _ = self.calculate_reactions()
-        shear = reaction_a
-        moment = reaction_a * x
+    def internal_forces_at(self, x: float) -> Tuple[float, float]:
+        """Calculates Shear Force (kN) and Bending Moment (kN*m) at point x (m)."""
+        r1, _ = self.compute_reactions()
+        shear = r1
+        moment = r1 * x
 
         for pl in self.point_loads:
-            if x >= pl.position:
-                shear -= pl.magnitude
-                moment -= pl.magnitude * (x - pl.position)
+            if x >= pl.position_m:
+                shear -= pl.magnitude_kn
+                moment -= pl.magnitude_kn * (x - pl.position_m)
 
-        for udl in self.uniform_loads:
-            if x > udl.start:
-                effective_end = min(x, udl.end)
-                eff_length = effective_end - udl.start
-                load_val = udl.magnitude * eff_length
-                centroid = udl.start + (eff_length / 2.0)
+        for udl in self.distributed_loads:
+            if x > udl.start_m:
+                eff_end = min(x, udl.end_m)
+                load_len = eff_end - udl.start_m
+                load_val = udl.magnitude_kn_m * load_len
                 shear -= load_val
+                centroid = udl.start_m + (load_len / 2.0)
                 moment -= load_val * (x - centroid)
 
         return shear, moment
 
-    def evaluate_beam(self, resolution_steps: int = 100) -> Dict[str, float]:
-        """Evaluates maximum shear, maximum moment, maximum bending stress, and safety factor."""
-        reaction_a, reaction_b = self.calculate_reactions()
-        dx = self.length / resolution_steps
+    def evaluate_structural_integrity(self, step_m: float = 0.05) -> Dict[str, float]:
+        """Scans beam span and evaluates maximum stresses and safety ratio."""
+        n_steps = int(self.length / step_m) + 1
+        max_shear_kn = 0.0
+        max_moment_kn_m = 0.0
 
-        max_shear = 0.0
-        max_moment = 0.0
+        for i in range(n_steps):
+            x = min(i * step_m, self.length)
+            v, m = self.internal_forces_at(x)
+            max_shear_kn = max(max_shear_kn, abs(v))
+            max_moment_kn_m = max(max_moment_kn_m, abs(m))
 
-        for i in range(resolution_steps + 1):
-            x = i * dx
-            v, m = self.calculate_internal_forces(x)
-            if abs(v) > abs(max_shear):
-                max_shear = abs(v)
-            if abs(m) > abs(max_moment):
-                max_moment = abs(m)
+        # Max Bending Stress: sigma = M / W (MPa = (N*mm) / mm^3)
+        m_max_n_mm = max_moment_kn_m * 1e6
+        w_mm3 = self.section.elastic_section_modulus_mm3
+        bending_stress_mpa = m_max_n_mm / w_mm3
 
-        c = self.section.depth / 2.0
-        max_bending_stress = (max_moment * c) / self.section.moment_of_inertia_z
-        safety_factor = self.section.yield_strength / max_bending_stress if max_bending_stress > 0 else float("inf")
-
-        # Approximation of maximum deflection under peak equivalent uniform load
-        # delta_max = 5 * w_eq * L^4 / (384 * E * I)
-        w_equivalent = (max_moment * 8.0) / (self.length ** 2) if self.length > 0 else 0.0
-        ei = self.section.elastic_modulus * self.section.moment_of_inertia_z
-        max_deflection_mm = (5.0 * w_equivalent * (self.length ** 4) / (384.0 * ei)) * 1000.0 if ei > 0 else 0.0
+        utilization_ratio = bending_stress_mpa / self.section.yield_strength_mpa
+        passed = utilization_ratio <= 1.0
 
         return {
-            "reaction_A_kN": round(reaction_a / 1000.0, 3),
-            "reaction_B_kN": round(reaction_b / 1000.0, 3),
-            "max_shear_kN": round(max_shear / 1000.0, 3),
-            "max_moment_kNm": round(max_moment / 1000.0, 3),
-            "max_bending_stress_MPa": round(max_bending_stress / 1e6, 3),
-            "yield_strength_MPa": round(self.section.yield_strength / 1e6, 3),
-            "estimated_deflection_mm": round(max_deflection_mm, 2),
-            "safety_factor": round(safety_factor, 2),
-            "status": "PASS" if safety_factor >= 1.5 else "FAIL (Insufficient Capacity)",
+            "max_shear_kn": round(max_shear_kn, 2),
+            "max_moment_kn_m": round(max_moment_kn_m, 2),
+            "max_bending_stress_mpa": round(bending_stress_mpa, 2),
+            "allowable_stress_mpa": self.section.yield_strength_mpa,
+            "utilization_ratio": round(utilization_ratio, 3),
+            "safety_factor": round(1.0 / utilization_ratio, 2) if utilization_ratio > 0 else float("inf"),
+            "status": "PASS" if passed else "FAIL"
         }
 
 
-# =====================================================================
+# ============================================================================
 # 2. CONSTRUCTION PROJECT SCHEDULER (CRITICAL PATH METHOD)
-# =====================================================================
+# ============================================================================
 
 @dataclass
-class ConstructionTask:
-    task_id: str
-    description: str
+class Activity:
+    id: str
+    name: str
     duration_days: int
     predecessors: List[str] = field(default_factory=list)
     early_start: int = 0
     early_finish: int = 0
     late_start: int = 0
     late_finish: int = 0
-    slack: int = 0
+    total_float: int = 0
     is_critical: bool = False
 
 
-class CriticalPathEngine:
-    """Performs forward and backward passes to compute CPM schedule and critical paths."""
+class CPMEngine:
+    """Computes project duration, float, and critical paths for construction planning."""
 
     def __init__(self):
-        self.tasks: Dict[str, ConstructionTask] = {}
+        self.activities: Dict[str, Activity] = {}
 
-    def add_task(self, task_id: str, description: str, duration_days: int, predecessors: Optional[List[str]] = None) -> None:
-        self.tasks[task_id] = ConstructionTask(
-            task_id=task_id,
-            description=description,
+    def add_activity(self, activity_id: str, name: str, duration_days: int, predecessors: List[str] = None):
+        if predecessors is None:
+            predecessors = []
+        self.activities[activity_id] = Activity(
+            id=activity_id,
+            name=name,
             duration_days=duration_days,
-            predecessors=predecessors or []
+            predecessors=predecessors
         )
 
     def calculate_schedule(self) -> Dict[str, any]:
-        # Forward Pass
-        for task in self.tasks.values():
-            if not task.predecessors:
-                task.early_start = 0
+        # 1. Forward Pass (Early Start / Early Finish)
+        successors_map: Dict[str, List[str]] = {aid: [] for aid in self.activities}
+        for aid, act in self.activities.items():
+            for p in act.predecessors:
+                if p not in self.activities:
+                    raise ValueError(f"Predecessor '{p}' not registered in schedule.")
+                successors_map[p].append(aid)
+
+        # Topological sorting
+        in_degree = {aid: len(act.predecessors) for aid, act in self.activities.items()}
+        queue = [aid for aid, deg in in_degree.items() if deg == 0]
+        topo_order = []
+
+        while queue:
+            curr = queue.pop(0)
+            topo_order.append(curr)
+            for succ in successors_map[curr]:
+                in_degree[succ] -= 1
+                if in_degree[succ] == 0:
+                    queue.append(succ)
+
+        if len(topo_order) != len(self.activities):
+            raise ValueError("Dependency loop detected in construction activity network.")
+
+        for aid in topo_order:
+            act = self.activities[aid]
+            if not act.predecessors:
+                act.early_start = 0
             else:
-                task.early_start = max(self.tasks[p].early_finish for p in task.predecessors)
-            task.early_finish = task.early_start + task.duration_days
+                act.early_start = max(self.activities[p].early_finish for p in act.predecessors)
+            act.early_finish = act.early_start + act.duration_days
 
-        total_duration = max(t.early_finish for t in self.tasks.values()) if self.tasks else 0
+        project_duration = max(act.early_finish for act in self.activities.values())
 
-        # Backward Pass
-        for task in self.tasks.values():
-            task.late_finish = total_duration
+        # 2. Backward Pass (Late Start / Late Finish)
+        for aid in reversed(topo_order):
+            act = self.activities[aid]
+            succs = successors_map[aid]
+            if not succs:
+                act.late_finish = project_duration
+            else:
+                act.late_finish = min(self.activities[s].late_start for s in succs)
+            act.late_start = act.late_finish - act.duration_days
+            act.total_float = act.late_start - act.early_start
+            act.is_critical = (act.total_float == 0)
 
-        # Determine successors
-        successors: Dict[str, List[str]] = {t_id: [] for t_id in self.tasks}
-        for task in self.tasks.values():
-            for p in task.predecessors:
-                successors[p].append(task.task_id)
+        critical_path = [aid for aid in topo_order if self.activities[aid].is_critical]
 
-        # Topological reverse traverse
-        for t_id in reversed(list(self.tasks.keys())):
-            task = self.tasks[t_id]
-            if successors[t_id]:
-                task.late_finish = min(self.tasks[s].late_start for s in successors[t_id])
-            task.late_start = task.late_finish - task.duration_days
-            task.slack = task.late_start - task.early_start
-            task.is_critical = (task.slack == 0)
-
-        critical_path = [t.task_id for t in self.tasks.values() if t.is_critical]
         return {
-            "total_project_duration_days": total_duration,
+            "total_duration_days": project_duration,
             "critical_path": critical_path,
-            "task_breakdown": [
-                {
-                    "id": t.task_id,
-                    "desc": t.description,
-                    "ES": t.early_start,
-                    "EF": t.early_finish,
-                    "LS": t.late_start,
-                    "LF": t.late_finish,
-                    "slack": t.slack,
-                    "critical": t.is_critical
+            "schedule": {
+                aid: {
+                    "name": act.name,
+                    "duration": act.duration_days,
+                    "ES": act.early_start,
+                    "EF": act.early_finish,
+                    "LS": act.late_start,
+                    "LF": act.late_finish,
+                    "float": act.total_float,
+                    "critical": act.is_critical
                 }
-                for t in self.tasks.values()
-            ]
+                for aid, act in self.activities.items()
+            }
         }
 
 
-# =====================================================================
-# 3. PROOF-OF-WORK (PoW) VERIFICATION & SEALING ENGINE
-# =====================================================================
+# ============================================================================
+# 3. EARTHWORK QUANTITY TAKEOFF ENGINE
+# ============================================================================
 
-class ProofOfWorkEngine:
-    """
-    Generates a verifiable SHA-256 cryptographic Proof-of-Work seal for the engineering build.
-    Guarantees structural payload integrity, timestamp authenticity, and work difficulty.
-    """
-
-    @staticmethod
-    def mine_proof(data: dict, difficulty: int = 4) -> dict:
-        target_prefix = "0" * difficulty
-        payload_string = json.dumps(data, sort_keys=True)
-        nonce = 0
-        start_time = time.time()
-
-        while True:
-            candidate = f"{payload_string}:{nonce}"
-            digest = hashlib.sha256(candidate.encode("utf-8")).hexdigest()
-            if digest.startswith(target_prefix):
-                elapsed = time.time() - start_time
-                return {
-                    "proof_hash": digest,
-                    "nonce": nonce,
-                    "difficulty": difficulty,
-                    "mining_duration_sec": round(elapsed, 4),
-                    "timestamp_utc": int(time.time()),
-                    "verified": True
-                }
-            nonce += 1
+@dataclass
+class CrossSectionStation:
+    station_chainage_m: float
+    cut_area_m2: float
+    fill_area_m2: float
 
 
-# =====================================================================
-# DEMONSTRATION & VERIFICATION PIPELINE
-# =====================================================================
+class EarthworkTakeoff:
+    """Calculates cumulative Cut and Fill earthwork volumes along station alignments."""
 
-def run_build_showcase() -> Dict[str, any]:
-    # 1. Structural Engineering Simulation: Standard Universal Beam W310x38.7 (AISC Steel)
-    steel_beam = CrossSection(
-        name="W310x38.7 Universal Steel Beam",
-        area=0.00494,  # m^2
-        moment_of_inertia_z=8.49e-5,  # m^4
-        elastic_modulus=200e9,  # 200 GPa
-        yield_strength=355e6,  # S355 Structural Steel (355 MPa)
-        depth=0.310  # 310 mm
-    )
+    def __init__(self):
+        self.stations: List[CrossSectionStation] = []
 
-    analyzer = StructuralBeamAnalyzer(span_length=8.0, section=steel_beam)
-    # Add Dead Load + Finishes (distributed load: 12.5 kN/m)
-    analyzer.add_uniform_load(magnitude=12500, start=0.0, end=8.0)
-    # Add Concentrated Live Load from Column above (point load: 45 kN at mid-span)
-    analyzer.add_point_load(magnitude=45000, position=4.0)
+    def add_station(self, chainage_m: float, cut_area_m2: float, fill_area_m2: float):
+        self.stations.append(CrossSectionStation(chainage_m, cut_area_m2, fill_area_m2))
+        self.stations.sort(key=lambda s: s.station_chainage_m)
 
-    structural_results = analyzer.evaluate_beam()
+    def compute_volumes(self) -> Dict[str, float]:
+        """Calculates volume using the standard Average End Area method."""
+        if len(self.stations) < 2:
+            return {"cut_volume_m3": 0.0, "fill_volume_m3": 0.0, "net_volume_m3": 0.0}
 
-    # 2. Construction CPM Scheduling
-    cpm = CriticalPathEngine()
-    cpm.add_task("T1", "Site Excavation & Shoring", duration_days=5)
-    cpm.add_task("T2", "Foundation Footings & Pouring", duration_days=7, predecessors=["T1"])
-    cpm.add_task("T3", "Structural Steel Erection", duration_days=6, predecessors=["T2"])
-    cpm.add_task("T4", "Underground MEP Utilities", duration_days=4, predecessors=["T2"])
-    cpm.add_task("T5", "Concrete Slab Decking", duration_days=5, predecessors=["T3"])
-    cpm.add_task("T6", "Building Envelope & Cladding", duration_days=8, predecessors=["T5", "T4"])
+        total_cut_m3 = 0.0
+        total_fill_m3 = 0.0
 
-    schedule_results = cpm.calculate_schedule()
+        for i in range(len(self.stations) - 1):
+            s1 = self.stations[i]
+            s2 = self.stations[i + 1]
+            dist = s2.station_chainage_m - s1.station_chainage_m
 
-    # 3. Create Proof-of-Work Block
-    build_summary = {
-        "event": "Show Your Build Weekly #5: Post Your Proof-of-Work",
-        "category": "Construction_and_Engineering",
-        "structural_analysis": structural_results,
-        "construction_schedule": {
-            "duration_days": schedule_results["total_project_duration_days"],
-            "critical_path": schedule_results["critical_path"]
+            cut_vol = ((s1.cut_area_m2 + s2.cut_area_m2) / 2.0) * dist
+            fill_vol = ((s1.fill_area_m2 + s2.fill_area_m2) / 2.0) * dist
+
+            total_cut_m3 += cut_vol
+            total_fill_m3 += fill_vol
+
+        return {
+            "cut_volume_m3": round(total_cut_m3, 2),
+            "fill_volume_m3": round(total_fill_m3, 2),
+            "net_volume_m3": round(total_cut_m3 - total_fill_m3, 2)  # Positive = surplus/export, Negative = borrow
         }
-    }
 
-    pow_receipt = ProofOfWorkEngine.mine_proof(build_summary, difficulty=4)
 
-    return {
-        "build_metadata": {
-            "name": "Structural Analysis & CPM Scheduler Engine",
-            "release": "Weekly Build #5",
-            "status": "Production-Ready",
-        },
-        "structural_analysis": structural_results,
-        "project_schedule": schedule_results,
-        "proof_of_work_receipt": pow_receipt
-    }
-
+# ============================================================================
+# VERIFICATION & PROOF-OF-WORK DEMONSTRATION
+# ============================================================================
 
 if __name__ == "__main__":
-    output = run_build_showcase()
-    print(json.dumps(output, indent=2))
+    print("=== Construction & Engineering POW Demo ===")
+
+    # 1. Structural Verification: I-Beam HEA 300 under combined loads
+    beam_section = BeamSection(
+        depth_mm=290.0,
+        flange_width_mm=300.0,
+        web_thickness_mm=8.5,
+        flange_thickness_mm=14.0,
+        yield_strength_mpa=355.0
+    )
+    beam = SimplySupportedBeam(length_m=8.0, section=beam_section)
+    beam.add_distributed_load(magnitude_kn_m=12.0, start_m=0.0, end_m=8.0)
+    beam.add_point_load(magnitude_kn=45.0, position_m=4.0)
+    r1, r2 = beam.compute_reactions()
+    structural_results = beam.evaluate_structural_integrity()
+    print(f"[Structural Beam] Reactions: R1={r1:.2f} kN, R2={r2:.2f} kN")
+    print(f"[Structural Beam] Integrity: {structural_results}")
+
+    # 2. Construction Schedule: Building Foundation & Superstructure
+    cpm = CPMEngine()
+    cpm.add_activity("A", "Site Clearing & Demolition", 4)
+    cpm.add_activity("B", "Excavation & Trenching", 6, ["A"])
+    cpm.add_activity("C", "Underground Utilities", 5, ["B"])
+    cpm.add_activity("D", "Rebar & Formwork", 7, ["B"])
+    cpm.add_activity("E", "Foundation Pour & Cure", 8, ["C", "D"])
+    cpm.add_activity("F", "Structural Steel Erection", 10, ["E"])
+    schedule_results = cpm.calculate_schedule()
+    print(f"[CPM Scheduler] Total Duration: {schedule_results['total_duration_days']} days")
+    print(f"[CPM Scheduler] Critical Path: {' -> '.join(schedule_results['critical_path'])}")
+
+    # 3. Earthwork Analysis
+    earthwork = EarthworkTakeoff()
+    earthwork.add_station(chainage_m=0.0, cut_area_m2=15.0, fill_area_m2=2.0)
+    earthwork.add_station(chainage_m=50.0, cut_area_m2=25.0, fill_area_m2=1.0)
+    earthwork.add_station(chainage_m=100.0, cut_area_m2=8.0, fill_area_m2=12.0)
+    volumes = earthwork.compute_volumes()
+    print(f"[Earthwork Takeoff] Cut/Fill Volumes: {volumes}")
 ```
