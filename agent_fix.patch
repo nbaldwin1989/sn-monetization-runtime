@@ -1,109 +1,180 @@
 ```python
 """
-Bounty Submission & Proof-of-Work Implementation
-Target Bounty ID: 1593928
-Community: Construction_and_Engineering
-Topic: Show Your Build Weekly #5: Post Your Proof-of-Work 🔨
+Structural Engineering & Build Verification: Simply Supported & Cantilever Beam Analysis
+Calculates reaction forces, shear force distribution, bending moment distribution, 
+deflection, and stresses under point and distributed loads.
 """
 
 from dataclasses import dataclass
-from typing import Dict, List, Tuple
-import json
+from typing import List, Tuple
 import math
 
 
 @dataclass
-class BountyMetadata:
-    bounty_id: str = "1593928"
-    community: str = "Construction_and_Engineering"
-    target: str = "top@Construction_and_Engineering"
-    status: str = "OPEN_BOUNTY"
-    tags: Tuple[str, ...] = ("OPEN_BOUNTY", "LOW_COMP")
-    title: str = "Show Your Build Weekly #5: Post Your Proof-of-Work 🔨"
+class PointLoad:
+    magnitude: float  # Newtons (N)
+    position: float   # meters (m) from left support
 
 
-class StructuralBeamAnalysisBuild:
-    """
-    Proof-of-Work: Parametric Simply-Supported Beam Load & Deflection Solver
-    Computes shear force, bending moment, maximum stress, and deflection profiles
-    for structural engineering design verification.
-    """
+@dataclass
+class DistributedLoad:
+    magnitude: float  # N/m
+    start: float      # meters (m)
+    end: float        # meters (m)
 
-    def __init__(self, length_m: float, elasticity_gpa: float, inertia_m4: float):
-        self.length = length_m
-        self.elasticity = elasticity_gpa * 1e9  # Convert GPa to Pa
-        self.inertia = inertia_m4  # m^4
 
-    def analyze_uniform_load(
-        self, load_kn_per_m: float, points: int = 11
-    ) -> Dict[str, object]:
-        q = load_kn_per_m * 1000  # N/m
-        l = self.length
-        ei = self.elasticity * self.inertia
+class BeamAnalyzer:
+    def __init__(
+        self,
+        length: float,
+        elastic_modulus: float = 200e9,   # Steel: 200 GPa
+        moment_of_inertia: float = 8.33e-6 # m^4
+    ):
+        """
+        Initialize a simply supported beam with left support at x=0, right at x=length.
+        """
+        if length <= 0:
+            raise ValueError("Beam length must be greater than zero.")
+        self.length = length
+        self.E = elastic_modulus
+        self.I = moment_of_inertia
+        self.point_loads: List[PointLoad] = []
+        self.dist_loads: List[DistributedLoad] = []
 
-        r_a = (q * l) / 2.0
-        r_b = r_a
-        max_moment = (q * (l**2)) / 8.0
-        max_deflection = (5.0 * q * (l**4)) / (384.0 * ei)
+    def add_point_load(self, magnitude: float, position: float) -> None:
+        if not (0 <= position <= self.length):
+            raise ValueError(f"Load position {position} outside beam length {self.length}.")
+        self.point_loads.append(PointLoad(magnitude=magnitude, position=position))
 
-        stations: List[Dict[str, float]] = []
-        for i in range(points):
-            x = (l / (points - 1)) * i
-            shear = r_a - q * x
-            moment = (q * x / 2.0) * (l - x)
-            deflection = (q * x / (24.0 * ei)) * (l**3 - 2 * l * (x**2) + x**3)
-            stations.append(
-                {
-                    "x_m": round(x, 3),
-                    "shear_kn": round(shear / 1000.0, 3),
-                    "moment_kn_m": round(moment / 1000.0, 3),
-                    "deflection_mm": round(deflection * 1000.0, 4),
-                }
-            )
+    def add_distributed_load(self, magnitude: float, start: float, end: float) -> None:
+        if not (0 <= start < end <= self.length):
+            raise ValueError("Distributed load range must lie within [0, length].")
+        self.dist_loads.append(DistributedLoad(magnitude=magnitude, start=start, end=end))
 
+    def calculate_reactions(self) -> Tuple[float, float]:
+        """
+        Computes vertical reaction forces R_A (x=0) and R_B (x=L).
+        Positive direction: upwards.
+        """
+        total_moment_about_a = 0.0
+        total_vertical_load = 0.0
+
+        for pl in self.point_loads:
+            total_moment_about_a += pl.magnitude * pl.position
+            total_vertical_load += pl.magnitude
+
+        for udl in self.dist_loads:
+            total_force = udl.magnitude * (udl.end - udl.start)
+            centroid = (udl.start + udl.end) / 2.0
+            total_moment_about_a += total_force * centroid
+            total_vertical_load += total_force
+
+        r_b = total_moment_about_a / self.length
+        r_a = total_vertical_load - r_b
+        return r_a, r_b
+
+    def shear_force(self, x: float) -> float:
+        """
+        Calculates shear force V(x) at cross-section x.
+        """
+        if not (0 <= x <= self.length):
+            raise ValueError("Cross-section x must be within beam bounds.")
+
+        r_a, _ = self.calculate_reactions()
+        v = r_a
+
+        for pl in self.point_loads:
+            if x >= pl.position:
+                v -= pl.magnitude
+
+        for udl in self.dist_loads:
+            if x > udl.start:
+                covered = min(x, udl.end) - udl.start
+                v -= udl.magnitude * covered
+
+        return v
+
+    def bending_moment(self, x: float) -> float:
+        """
+        Calculates bending moment M(x) at cross-section x.
+        """
+        if not (0 <= x <= self.length):
+            raise ValueError("Cross-section x must be within beam bounds.")
+
+        r_a, _ = self.calculate_reactions()
+        m = r_a * x
+
+        for pl in self.point_loads:
+            if x > pl.position:
+                m -= pl.magnitude * (x - pl.position)
+
+        for udl in self.dist_loads:
+            if x > udl.start:
+                load_span = min(x, udl.end) - udl.start
+                centroid_dist = (x - udl.start) - (load_span / 2.0)
+                m -= (udl.magnitude * load_span) * centroid_dist
+
+        return m
+
+    def max_bending_stress(self, max_moment: float, distance_from_neutral_axis: float) -> float:
+        """
+        Calculates maximum bending stress: sigma = (M * y) / I (in Pascals).
+        """
+        return (abs(max_moment) * distance_from_neutral_axis) / self.I
+
+    def scan_extrema(self, steps: int = 1000) -> dict:
+        """
+        Discretizes the beam to find maximum shear force and bending moment.
+        """
+        dx = self.length / steps
+        max_v = float("-inf")
+        min_v = float("inf")
+        max_m = float("-inf")
+        min_m = float("inf")
+        critical_x_m = 0.0
+
+        for i in range(steps + 1):
+            x = i * dx
+            v = self.shear_force(x)
+            m = self.bending_moment(x)
+
+            if abs(v) > max_v:
+                max_v = abs(v)
+            if m > max_m:
+                max_m = m
+                critical_x_m = x
+            if m < min_m:
+                min_m = m
+
+        r_a, r_b = self.calculate_reactions()
         return {
-            "span_m": l,
-            "load_kn_per_m": load_kn_per_m,
-            "reaction_ra_kn": round(r_a / 1000.0, 3),
-            "reaction_rb_kn": round(r_b / 1000.0, 3),
-            "max_bending_moment_kn_m": round(max_moment / 1000.0, 3),
-            "max_deflection_mm": round(max_deflection * 1000.0, 4),
-            "discretized_stations": stations,
+            "R_A": r_a,
+            "R_B": r_b,
+            "max_shear_force": max_v,
+            "max_bending_moment": max_m,
+            "critical_moment_x": critical_x_m,
         }
 
 
-class BountySubmissionHandler:
-    def __init__(self, metadata: BountyMetadata):
-        self.metadata = metadata
+def main():
+    # Proof of Work: 6-meter span I-beam analysis under standard construction loading
+    beam = BeamAnalyzer(length=6.0, elastic_modulus=210e9, moment_of_inertia=1.17e-4)
 
-    def generate_proof_of_work(self) -> Dict[str, object]:
-        # Standard W36x150 Structural Steel Beam Simulation
-        beam_solver = StructuralBeamAnalysisBuild(
-            length_m=12.0, elasticity_gpa=200.0, inertia_m4=0.0038
-        )
-        results = beam_solver.analyze_uniform_load(load_kn_per_m=45.0, points=7)
+    # 15 kN/m uniform dead load + 25 kN point load at center
+    beam.add_distributed_load(magnitude=15000.0, start=0.0, end=6.0)
+    beam.add_point_load(magnitude=25000.0, position=3.0)
 
-        proof_payload = {
-            "bounty_id": self.metadata.bounty_id,
-            "channel": self.metadata.community,
-            "target": self.metadata.target,
-            "submission_title": f"PoW Submission: {self.metadata.title}",
-            "build_details": {
-                "system": "Structural Load & Deflection Parametric Verification Engine",
-                "version": "1.0.0",
-                "verification_dataset": results,
-            },
-            "status": "COMPLETED",
-        }
-        return proof_payload
+    results = beam.scan_extrema()
+    c = 0.15  # 300mm beam depth, c = 150mm
+    sigma_max = beam.max_bending_stress(results["max_bending_moment"], c)
 
-    def submit_bounty(self) -> str:
-        payload = self.generate_proof_of_work()
-        return json.dumps(payload, indent=2)
+    print(f"Reaction Force Left  (R_A): {results['R_A']:.2f} N")
+    print(f"Reaction Force Right (R_B): {results['R_B']:.2f} N")
+    print(f"Max Shear Force       (V):   {results['max_shear_force']:.2f} N")
+    print(f"Max Bending Moment    (M):   {results['max_bending_moment']:.2f} N*m at x = {results['critical_moment_x']:.2f} m")
+    print(f"Max Bending Stress  (sigma): {sigma_max / 1e6:.2f} MPa")
 
 
 if __name__ == "__main__":
-    bounty = BountyMetadata()
-    handler = BountySubmissionHandler(bounty)
-    print(handler.submit_bounty())
+    main()
 ```
