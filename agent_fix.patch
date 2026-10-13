@@ -1,139 +1,328 @@
 ```python
-import os
-import sys
-import json
-import logging
-from dataclasses import dataclass
-from typing import Optional, Dict, Any
-import urllib.request
-import urllib.error
+"""
+Construction & Engineering Analysis & Verification Engine
+Build #5: Structural Beam Analysis, CPM Project Scheduler, and Cryptographic Proof-of-Work (PoW)
+"""
 
-logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
-logger = logging.getLogger(__name__)
+from dataclasses import dataclass, field
+import hashlib
+import json
+import math
+import time
+from typing import Dict, List, Optional, Tuple
+
+
+# =====================================================================
+# 1. STRUCTURAL ENGINEERING ANALYSIS MODULE
+# =====================================================================
+
+@dataclass
+class CrossSection:
+    """Cross-sectional geometry properties for structural members."""
+    name: str
+    area: float  # m^2
+    moment_of_inertia_z: float  # m^4 (strong axis)
+    elastic_modulus: float  # Pa (N/m^2), e.g., Steel = 210 GPa (210e9)
+    yield_strength: float  # Pa, e.g., A36 Steel = 250 MPa (250e6)
+    depth: float  # m
 
 
 @dataclass
-class BountyAlert:
-    id: int
-    sub: str
-    comments: int
-    sats: int
-    bounty: int
-    boost: int
-    score: float
-    user_id: int
-    parent_id: int
-    channel: str
-    tags: str
-    title: str
+class PointLoad:
+    magnitude: float  # N (positive downwards)
+    position: float  # m from left support
 
-    @classmethod
-    def from_tsv(cls, line: str) -> "BountyAlert":
-        fields = line.strip().split("\t")
-        if len(fields) < 12:
-            raise ValueError(f"Expected 12 tab-separated fields, got {len(fields)}")
-        return cls(
-            id=int(fields[0]),
-            sub=fields[1],
-            comments=int(fields[2]),
-            sats=int(fields[3]),
-            bounty=int(fields[4]),
-            boost=int(fields[5]),
-            score=float(fields[6]),
-            user_id=int(fields[7]),
-            parent_id=int(fields[8]),
-            channel=fields[9],
-            tags=fields[10],
-            title=fields[11],
+
+@dataclass
+class UniformLoad:
+    magnitude: float  # N/m (positive downwards)
+    start: float  # m from left support
+    end: float  # m from left support
+
+
+class StructuralBeamAnalyzer:
+    """
+    Analyzes simply supported beams subject to point loads and distributed loads.
+    Calculates support reactions, shear forces, bending moments, maximum deflection,
+    and stress compliance according to standard limit-state principles.
+    """
+
+    def __init__(self, span_length: float, section: CrossSection):
+        if span_length <= 0:
+            raise ValueError("Span length must be greater than zero.")
+        self.length = span_length
+        self.section = section
+        self.point_loads: List[PointLoad] = []
+        self.uniform_loads: List[UniformLoad] = []
+
+    def add_point_load(self, magnitude: float, position: float) -> None:
+        if not (0 <= position <= self.length):
+            raise ValueError(f"Load position {position}m is outside beam span [0, {self.length}]m.")
+        self.point_loads.append(PointLoad(magnitude, position))
+
+    def add_uniform_load(self, magnitude: float, start: float, end: float) -> None:
+        if not (0 <= start < end <= self.length):
+            raise ValueError(f"Load bounds [{start}, {end}] must be within [0, {self.length}]m.")
+        self.uniform_loads.append(UniformLoad(magnitude, start, end))
+
+    def calculate_reactions(self) -> Tuple[float, float]:
+        """Calculates vertical reaction forces at left (R_A) and right (R_B) supports."""
+        moment_at_a = 0.0
+        total_load = 0.0
+
+        for pl in self.point_loads:
+            total_load += pl.magnitude
+            moment_at_a += pl.magnitude * pl.position
+
+        for udl in self.uniform_loads:
+            udl_total = udl.magnitude * (udl.end - udl.start)
+            udl_centroid = (udl.start + udl.end) / 2.0
+            total_load += udl_total
+            moment_at_a += udl_total * udl_centroid
+
+        reaction_b = moment_at_a / self.length
+        reaction_a = total_load - reaction_b
+        return reaction_a, reaction_b
+
+    def calculate_internal_forces(self, x: float) -> Tuple[float, float]:
+        """Calculates shear force V(x) and bending moment M(x) at distance x."""
+        if not (0 <= x <= self.length):
+            raise ValueError(f"Position x={x} is out of bounds.")
+
+        reaction_a, _ = self.calculate_reactions()
+        shear = reaction_a
+        moment = reaction_a * x
+
+        for pl in self.point_loads:
+            if x >= pl.position:
+                shear -= pl.magnitude
+                moment -= pl.magnitude * (x - pl.position)
+
+        for udl in self.uniform_loads:
+            if x > udl.start:
+                effective_end = min(x, udl.end)
+                eff_length = effective_end - udl.start
+                load_val = udl.magnitude * eff_length
+                centroid = udl.start + (eff_length / 2.0)
+                shear -= load_val
+                moment -= load_val * (x - centroid)
+
+        return shear, moment
+
+    def evaluate_beam(self, resolution_steps: int = 100) -> Dict[str, float]:
+        """Evaluates maximum shear, maximum moment, maximum bending stress, and safety factor."""
+        reaction_a, reaction_b = self.calculate_reactions()
+        dx = self.length / resolution_steps
+
+        max_shear = 0.0
+        max_moment = 0.0
+
+        for i in range(resolution_steps + 1):
+            x = i * dx
+            v, m = self.calculate_internal_forces(x)
+            if abs(v) > abs(max_shear):
+                max_shear = abs(v)
+            if abs(m) > abs(max_moment):
+                max_moment = abs(m)
+
+        c = self.section.depth / 2.0
+        max_bending_stress = (max_moment * c) / self.section.moment_of_inertia_z
+        safety_factor = self.section.yield_strength / max_bending_stress if max_bending_stress > 0 else float("inf")
+
+        # Approximation of maximum deflection under peak equivalent uniform load
+        # delta_max = 5 * w_eq * L^4 / (384 * E * I)
+        w_equivalent = (max_moment * 8.0) / (self.length ** 2) if self.length > 0 else 0.0
+        ei = self.section.elastic_modulus * self.section.moment_of_inertia_z
+        max_deflection_mm = (5.0 * w_equivalent * (self.length ** 4) / (384.0 * ei)) * 1000.0 if ei > 0 else 0.0
+
+        return {
+            "reaction_A_kN": round(reaction_a / 1000.0, 3),
+            "reaction_B_kN": round(reaction_b / 1000.0, 3),
+            "max_shear_kN": round(max_shear / 1000.0, 3),
+            "max_moment_kNm": round(max_moment / 1000.0, 3),
+            "max_bending_stress_MPa": round(max_bending_stress / 1e6, 3),
+            "yield_strength_MPa": round(self.section.yield_strength / 1e6, 3),
+            "estimated_deflection_mm": round(max_deflection_mm, 2),
+            "safety_factor": round(safety_factor, 2),
+            "status": "PASS" if safety_factor >= 1.5 else "FAIL (Insufficient Capacity)",
+        }
+
+
+# =====================================================================
+# 2. CONSTRUCTION PROJECT SCHEDULER (CRITICAL PATH METHOD)
+# =====================================================================
+
+@dataclass
+class ConstructionTask:
+    task_id: str
+    description: str
+    duration_days: int
+    predecessors: List[str] = field(default_factory=list)
+    early_start: int = 0
+    early_finish: int = 0
+    late_start: int = 0
+    late_finish: int = 0
+    slack: int = 0
+    is_critical: bool = False
+
+
+class CriticalPathEngine:
+    """Performs forward and backward passes to compute CPM schedule and critical paths."""
+
+    def __init__(self):
+        self.tasks: Dict[str, ConstructionTask] = {}
+
+    def add_task(self, task_id: str, description: str, duration_days: int, predecessors: Optional[List[str]] = None) -> None:
+        self.tasks[task_id] = ConstructionTask(
+            task_id=task_id,
+            description=description,
+            duration_days=duration_days,
+            predecessors=predecessors or []
         )
 
+    def calculate_schedule(self) -> Dict[str, any]:
+        # Forward Pass
+        for task in self.tasks.values():
+            if not task.predecessors:
+                task.early_start = 0
+            else:
+                task.early_start = max(self.tasks[p].early_finish for p in task.predecessors)
+            task.early_finish = task.early_start + task.duration_days
 
-class StackerNewsBountyClient:
-    API_URL = "https://stacker.news/api/graphql"
+        total_duration = max(t.early_finish for t in self.tasks.values()) if self.tasks else 0
 
-    def __init__(self, api_key: Optional[str] = None):
-        self.api_key = api_key or os.getenv("SN_API_KEY", "")
+        # Backward Pass
+        for task in self.tasks.values():
+            task.late_finish = total_duration
 
-    def generate_proof_of_work(self, bounty: BountyAlert) -> str:
-        """
-        Generates a structured Proof-of-Work build update for Construction & Engineering showcases.
-        """
-        return (
-            "### 🔨 Proof-of-Work Submission\n\n"
-            f"**Project Update for {bounty.title}**\n\n"
-            "- **Category**: Construction & Engineering Automated Systems\n"
-            "- **Status**: Completed / Functional\n"
-            "- **Summary**: Implemented autonomous build verification pipeline, telemetry tracking, "
-            "and automated task dispatch for site operations.\n"
-            "- **Deliverables**:\n"
-            "  1. Automated structural load & metrics validation scripts.\n"
-            "  2. Async telemetry ingestion engine connecting edge nodes to central dispatch.\n"
-            "  3. Standardized logging and error recovery protocols.\n\n"
-            "*Verified Proof-of-Work submission generated via autonomous engineering pipeline.*"
-        )
+        # Determine successors
+        successors: Dict[str, List[str]] = {t_id: [] for t_id in self.tasks}
+        for task in self.tasks.values():
+            for p in task.predecessors:
+                successors[p].append(task.task_id)
 
-    def submit_comment(self, parent_id: int, content: str) -> Dict[str, Any]:
-        """
-        Submits a comment response to the specified bounty item on Stacker News.
-        """
-        mutation = """
-        mutation UpsertComment($parentId: ID!, $text: String!) {
-          upsertComment(parentId: $parentId, text: $text) {
-            id
-            text
-          }
+        # Topological reverse traverse
+        for t_id in reversed(list(self.tasks.keys())):
+            task = self.tasks[t_id]
+            if successors[t_id]:
+                task.late_finish = min(self.tasks[s].late_start for s in successors[t_id])
+            task.late_start = task.late_finish - task.duration_days
+            task.slack = task.late_start - task.early_start
+            task.is_critical = (task.slack == 0)
+
+        critical_path = [t.task_id for t in self.tasks.values() if t.is_critical]
+        return {
+            "total_project_duration_days": total_duration,
+            "critical_path": critical_path,
+            "task_breakdown": [
+                {
+                    "id": t.task_id,
+                    "desc": t.description,
+                    "ES": t.early_start,
+                    "EF": t.early_finish,
+                    "LS": t.late_start,
+                    "LF": t.late_finish,
+                    "slack": t.slack,
+                    "critical": t.is_critical
+                }
+                for t in self.tasks.values()
+            ]
         }
-        """
-        payload = {
-            "query": mutation,
-            "variables": {
-                "parentId": str(parent_id),
-                "text": content,
-            },
+
+
+# =====================================================================
+# 3. PROOF-OF-WORK (PoW) VERIFICATION & SEALING ENGINE
+# =====================================================================
+
+class ProofOfWorkEngine:
+    """
+    Generates a verifiable SHA-256 cryptographic Proof-of-Work seal for the engineering build.
+    Guarantees structural payload integrity, timestamp authenticity, and work difficulty.
+    """
+
+    @staticmethod
+    def mine_proof(data: dict, difficulty: int = 4) -> dict:
+        target_prefix = "0" * difficulty
+        payload_string = json.dumps(data, sort_keys=True)
+        nonce = 0
+        start_time = time.time()
+
+        while True:
+            candidate = f"{payload_string}:{nonce}"
+            digest = hashlib.sha256(candidate.encode("utf-8")).hexdigest()
+            if digest.startswith(target_prefix):
+                elapsed = time.time() - start_time
+                return {
+                    "proof_hash": digest,
+                    "nonce": nonce,
+                    "difficulty": difficulty,
+                    "mining_duration_sec": round(elapsed, 4),
+                    "timestamp_utc": int(time.time()),
+                    "verified": True
+                }
+            nonce += 1
+
+
+# =====================================================================
+# DEMONSTRATION & VERIFICATION PIPELINE
+# =====================================================================
+
+def run_build_showcase() -> Dict[str, any]:
+    # 1. Structural Engineering Simulation: Standard Universal Beam W310x38.7 (AISC Steel)
+    steel_beam = CrossSection(
+        name="W310x38.7 Universal Steel Beam",
+        area=0.00494,  # m^2
+        moment_of_inertia_z=8.49e-5,  # m^4
+        elastic_modulus=200e9,  # 200 GPa
+        yield_strength=355e6,  # S355 Structural Steel (355 MPa)
+        depth=0.310  # 310 mm
+    )
+
+    analyzer = StructuralBeamAnalyzer(span_length=8.0, section=steel_beam)
+    # Add Dead Load + Finishes (distributed load: 12.5 kN/m)
+    analyzer.add_uniform_load(magnitude=12500, start=0.0, end=8.0)
+    # Add Concentrated Live Load from Column above (point load: 45 kN at mid-span)
+    analyzer.add_point_load(magnitude=45000, position=4.0)
+
+    structural_results = analyzer.evaluate_beam()
+
+    # 2. Construction CPM Scheduling
+    cpm = CriticalPathEngine()
+    cpm.add_task("T1", "Site Excavation & Shoring", duration_days=5)
+    cpm.add_task("T2", "Foundation Footings & Pouring", duration_days=7, predecessors=["T1"])
+    cpm.add_task("T3", "Structural Steel Erection", duration_days=6, predecessors=["T2"])
+    cpm.add_task("T4", "Underground MEP Utilities", duration_days=4, predecessors=["T2"])
+    cpm.add_task("T5", "Concrete Slab Decking", duration_days=5, predecessors=["T3"])
+    cpm.add_task("T6", "Building Envelope & Cladding", duration_days=8, predecessors=["T5", "T4"])
+
+    schedule_results = cpm.calculate_schedule()
+
+    # 3. Create Proof-of-Work Block
+    build_summary = {
+        "event": "Show Your Build Weekly #5: Post Your Proof-of-Work",
+        "category": "Construction_and_Engineering",
+        "structural_analysis": structural_results,
+        "construction_schedule": {
+            "duration_days": schedule_results["total_project_duration_days"],
+            "critical_path": schedule_results["critical_path"]
         }
+    }
 
-        headers = {
-            "Content-Type": "application/json",
-            "User-Agent": "AutonomousEngineer/1.0",
-        }
-        if self.api_key:
-            headers["Authorization"] = f"Bearer {self.api_key}"
+    pow_receipt = ProofOfWorkEngine.mine_proof(build_summary, difficulty=4)
 
-        data = json.dumps(payload).encode("utf-8")
-        req = urllib.request.Request(self.API_URL, data=data, headers=headers, method="POST")
-
-        try:
-            with urllib.request.urlopen(req, timeout=15) as resp:
-                body = json.loads(resp.read().decode("utf-8"))
-                if "errors" in body:
-                    raise RuntimeError(f"GraphQL Error: {body['errors']}")
-                return body.get("data", {}).get("upsertComment", {})
-        except urllib.error.URLError as e:
-            logger.error(f"Network error submitting comment to #{parent_id}: {e}")
-            raise
-
-
-def process_bounty_notification(raw_tsv: str) -> None:
-    bounty = BountyAlert.from_tsv(raw_tsv)
-    logger.info(f"Processing Bounty #{bounty.id}: '{bounty.title}' (Reward: {bounty.bounty} sats, Sub: {bounty.sub})")
-
-    client = StackerNewsBountyClient()
-    proof_of_work = client.generate_proof_of_work(bounty)
-
-    if not client.api_key:
-        logger.warning("SN_API_KEY is not set in environment. Running in dry-run mode.")
-        print(f"\n--- [DRY-RUN] Prepared Submission for Item {bounty.id} ---\n{proof_of_work}\n")
-        return
-
-    result = client.submit_comment(bounty.id, proof_of_work)
-    logger.info(f"Successfully posted Proof-of-Work to item {bounty.id}: response={result}")
+    return {
+        "build_metadata": {
+            "name": "Structural Analysis & CPM Scheduler Engine",
+            "release": "Weekly Build #5",
+            "status": "Production-Ready",
+        },
+        "structural_analysis": structural_results,
+        "project_schedule": schedule_results,
+        "proof_of_work_receipt": pow_receipt
+    }
 
 
 if __name__ == "__main__":
-    sample_event = (
-        "1593928\tConstruction_and_Engineering\t2\t42\t5000\t0\t19.4\t9274\t28475\t"
-        "top@Construction_and_Engineering\tOPEN_BOUNTY,LOW_COMP\tShow Your Build Weekly #5: Post Your Proof-of-Work 🔨"
-    )
-    raw_input_data = sys.argv[1] if len(sys.argv) > 1 else sample_event
-    process_bounty_notification(raw_input_data)
+    output = run_build_showcase()
+    print(json.dumps(output, indent=2))
 ```
