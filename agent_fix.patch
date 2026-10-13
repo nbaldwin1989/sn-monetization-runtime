@@ -1,313 +1,320 @@
 ```python
-#!/usr/bin/env python3
 """
-Construction & Engineering Proof-of-Work Toolkit (Build #5)
------------------------------------------------------------
-Comprehensive suite for civil and structural engineering workflows:
-1. Structural Beam Analysis: Shear, moment, stress, and deflection under point & distributed loads.
-2. Concrete & Material Takeoff: Structural mix design, dry-volume conversions, and rebar tonnage.
-3. Critical Path Method (CPM) Scheduler: Construction project task dependency and float calculation.
+Construction & Engineering Proof-of-Work (PoW) Build System
+Weekly Build: Structural Load Analysis, Material Takeoff & Tamper-Evident QA Audit Trail
 """
 
-from dataclasses import dataclass, field
-from enum import Enum
-from typing import Dict, List, Optional, Set, Tuple
+import hashlib
+import json
 import math
+import time
+from dataclasses import asdict, dataclass
+from typing import Dict, List, Optional, Tuple
 
 
-# ============================================================================
-# 1. STRUCTURAL BEAM ANALYSIS (Euler-Bernoulli Beam Theory)
-# ============================================================================
-
-class BeamSupportType(Enum):
-    SIMPLY_SUPPORTED = "Simply Supported"
-    CANTILEVER = "Cantilever (Fixed-Free)"
-
+# =====================================================================
+# 1. Structural Engineering Analysis Engine
+# =====================================================================
 
 @dataclass
-class PointLoad:
-    position_m: float
-    magnitude_kn: float  # Downward positive
+class BeamGeometry:
+    length_m: float
+    depth_mm: float
+    width_mm: float
+    flange_thickness_mm: float
+    web_thickness_mm: float
 
+    @property
+    def area_m2(self) -> float:
+        """Cross-sectional area of an I-beam section."""
+        a_flanges = 2 * (self.width_mm * self.flange_thickness_mm)
+        a_web = (self.depth_mm - 2 * self.flange_thickness_mm) * self.web_thickness_mm
+        return (a_flanges + a_web) * 1e-6
 
-@dataclass
-class DistributedLoad:
-    start_m: float
-    end_m: float
-    intensity_kn_per_m: float  # Downward positive
-
-
-class StructuralBeamAnalyzer:
-    """Analyzes reactions, internal shear, bending moments, and deflections for beams."""
-
-    def __init__(self, length_m: float, e_gpa: float = 200.0, i_cm4: float = 8356.0):
-        """
-        :param length_m: Span length in meters.
-        :param e_gpa: Modulus of elasticity in GPa (Default: Structural Steel ~200 GPa).
-        :param i_cm4: Moment of inertia in cm^4 (Default: W-beam section ~8356 cm^4).
-        """
-        self.length = length_m
-        self.e = e_gpa * 1e9  # N/m^2 (Pa)
-        self.i = i_cm4 * 1e-8  # m^4
-        self.ei = self.e * self.i  # N*m^2
-        self.point_loads: List[PointLoad] = []
-        self.distributed_loads: List[DistributedLoad] = []
-
-    def add_point_load(self, position_m: float, magnitude_kn: float) -> None:
-        if 0.0 <= position_m <= self.length:
-            self.point_loads.append(PointLoad(position_m, magnitude_kn))
-        else:
-            raise ValueError(f"Load position {position_m}m out of bounds [0, {self.length}]m")
-
-    def add_distributed_load(self, start_m: float, end_m: float, intensity_kn_per_m: float) -> None:
-        if 0.0 <= start_m < end_m <= self.length:
-            self.distributed_loads.append(DistributedLoad(start_m, end_m, intensity_kn_per_m))
-        else:
-            raise ValueError(f"UDL bounds [{start_m}, {end_m}]m invalid for beam span {self.length}m")
-
-    def compute_simply_supported_reactions(self) -> Tuple[float, float]:
-        """Calculates vertical reaction forces R1 (at x=0) and R2 (at x=L) in kN."""
-        moment_at_r1 = 0.0
-        total_vertical_load = 0.0
-
-        for pl in self.point_loads:
-            moment_at_r1 += pl.magnitude_kn * pl.position_m
-            total_vertical_load += pl.magnitude_kn
-
-        for udl in self.distributed_loads:
-            span = udl.end_m - udl.start_m
-            equiv_load = udl.intensity_kn_per_m * span
-            centroid = udl.start_m + (span / 2.0)
-            moment_at_r1 += equiv_load * centroid
-            total_vertical_load += equiv_load
-
-        r2 = moment_at_r1 / self.length
-        r1 = total_vertical_load - r2
-        return round(r1, 3), round(r2, 3)
-
-    def shear_force(self, x: float, r1: float) -> float:
-        """Internal shear force V(x) in kN."""
-        v = r1
-        for pl in self.point_loads:
-            if x >= pl.position_m:
-                v -= pl.magnitude_kn
-        for udl in self.distributed_loads:
-            if x > udl.start_m:
-                overlap = min(x, udl.end_m) - udl.start_m
-                v -= udl.intensity_kn_per_m * overlap
-        return round(v, 3)
-
-    def bending_moment(self, x: float, r1: float) -> float:
-        """Internal bending moment M(x) in kN*m."""
-        m = r1 * x
-        for pl in self.point_loads:
-            if x > pl.position_m:
-                m -= pl.magnitude_kn * (x - pl.position_m)
-        for udl in self.distributed_loads:
-            if x > udl.start_m:
-                overlap = min(x, udl.end_m) - udl.start_m
-                centroid_dist = overlap / 2.0
-                m -= udl.intensity_kn_per_m * overlap * (x - (udl.start_m + centroid_dist))
-        return round(m, 3)
-
-    def evaluate_beam(self, num_points: int = 100) -> Dict[str, float]:
-        """Returns peak structural responses: max shear, max moment, and maximum deflection."""
-        r1, r2 = self.compute_simply_supported_reactions()
-        step = self.length / num_points
-        max_shear = 0.0
-        max_moment = 0.0
-
-        for i in range(num_points + 1):
-            x = i * step
-            v = abs(self.shear_force(x, r1))
-            m = abs(self.bending_moment(x, r1))
-            max_shear = max(max_shear, v)
-            max_moment = max(max_moment, m)
-
-        # Standard mid-span approximation for primary distributed/center load deflection
-        approx_w_total = sum(udl.intensity_kn_per_m * (udl.end_m - udl.start_m) for udl in self.distributed_loads) * 1e3
-        approx_p_total = sum(pl.magnitude_kn for pl in self.point_loads) * 1e3
+    @property
+    def second_moment_of_area_ixx_m4(self) -> float:
+        """Moment of inertia (Ixx) along the major bending axis."""
+        d = self.depth_mm
+        b = self.width_mm
+        tw = self.web_thickness_mm
+        tf = self.flange_thickness_mm
         
-        # Superposition deflection at midspan
-        l_m = self.length
-        deflection_udl = (5 * approx_w_total * (l_m ** 3)) / (384 * self.ei) if self.ei > 0 else 0.0
-        deflection_pt = (approx_p_total * (l_m ** 3)) / (48 * self.ei) if self.ei > 0 else 0.0
-        max_deflection_mm = (deflection_udl + deflection_pt) * 1000.0
+        # Parallel axis theorem / composite rectangles
+        i_gross = (b * (d ** 3)) / 12.0
+        h_web = d - 2 * tf
+        w_removed = b - tw
+        i_removed = (w_removed * (h_web ** 3)) / 12.0
+        return (i_gross - i_removed) * 1e-12
 
-        return {
-            "R1_kN": r1,
-            "R2_kN": r2,
-            "Max_Shear_kN": max_shear,
-            "Max_Bending_Moment_kNm": max_moment,
-            "Estimated_Max_Deflection_mm": round(max_deflection_mm, 2)
-        }
-
-
-# ============================================================================
-# 2. CONCRETE MIX DESIGN & MATERIAL TAKEOFF
-# ============================================================================
-
-class ConcreteGrade(Enum):
-    M15 = (1.0, 2.0, 4.0)   # Lean/Plain concrete
-    M20 = (1.0, 1.5, 3.0)   # Standard reinforced concrete
-    M25 = (1.0, 1.0, 2.0)   # Heavy load structural elements
-
-
-class ConcreteTakeoffEstimator:
-    """Calculates dry material requirements and reinforcement rebar weight for concrete structures."""
-
-    CEMENT_BAG_WEIGHT_KG = 50.0
-    CEMENT_DENSITY_KG_M3 = 1440.0
-    STEEL_DENSITY_KG_M3 = 7850.0
-    DRY_VOLUME_FACTOR = 1.54  # 54% bulk increase for dry sand/aggregate batching
-
-    @staticmethod
-    def calculate_mix_materials(wet_volume_m3: float, grade: ConcreteGrade) -> Dict[str, float]:
-        """Calculates cement (bags), sand (m³), aggregate (m³), and water required."""
-        dry_volume = wet_volume_m3 * ConcreteTakeoffEstimator.DRY_VOLUME_FACTOR
-        c_ratio, s_ratio, a_ratio = grade.value
-        total_parts = c_ratio + s_ratio + a_ratio
-
-        cement_volume_m3 = (c_ratio / total_parts) * dry_volume
-        sand_volume_m3 = (s_ratio / total_parts) * dry_volume
-        aggregate_volume_m3 = (a_ratio / total_parts) * dry_volume
-
-        cement_kg = cement_volume_m3 * ConcreteTakeoffEstimator.CEMENT_DENSITY_KG_M3
-        cement_bags = cement_kg / ConcreteTakeoffEstimator.CEMENT_BAG_WEIGHT_KG
-        water_liters = cement_kg * 0.45  # Standard W/C ratio = 0.45
-
-        return {
-            "wet_volume_m3": round(wet_volume_m3, 2),
-            "cement_bags": round(cement_bags, 1),
-            "cement_mass_kg": round(cement_kg, 1),
-            "sand_volume_m3": round(sand_volume_m3, 2),
-            "aggregate_volume_m3": round(aggregate_volume_m3, 2),
-            "mixing_water_liters": round(water_liters, 1),
-        }
-
-    @staticmethod
-    def calculate_rebar_weight(diameter_mm: float, length_m: float) -> float:
-        """Calculates nominal steel rebar weight using standard formula: (D^2 / 162.2) * L."""
-        unit_weight_kg_per_m = (diameter_mm ** 2) / 162.28
-        return round(unit_weight_kg_per_m * length_m, 2)
-
-
-# ============================================================================
-# 3. CRITICAL PATH METHOD (CPM) PROJECT SCHEDULER
-# ============================================================================
 
 @dataclass
-class Activity:
-    id: str
-    description: str
-    duration_days: int
-    dependencies: List[str] = field(default_factory=list)
-    early_start: int = 0
-    early_finish: int = 0
-    late_start: int = 0
-    late_finish: int = 0
-    total_float: int = 0
-    is_critical: bool = False
+class MaterialProperties:
+    name: str
+    yield_strength_mpa: float
+    elastic_modulus_gpa: float
+    density_kg_m3: float
+    unit_cost_usd_per_kg: float
 
 
-class CriticalPathMethodEngine:
-    """Project scheduling engine computing ES, EF, LS, LF, total float, and critical path."""
+class StructuralAnalysis:
+    """Performs static determinate analysis on simply supported beams under UDL."""
 
-    def __init__(self):
-        self.activities: Dict[str, Activity] = {}
+    def __init__(self, beam: BeamGeometry, material: MaterialProperties):
+        self.beam = beam
+        self.material = material
 
-    def add_activity(self, id: str, description: str, duration_days: int, dependencies: Optional[List[str]] = None) -> None:
-        self.activities[id] = Activity(
-            id=id,
-            description=description,
-            duration_days=duration_days,
-            dependencies=dependencies or []
+    def calculate_distributed_load_capacity(
+        self, distributed_load_kn_per_m: float
+    ) -> Dict[str, float]:
+        l = self.beam.length_m
+        q = distributed_load_kn_per_m * 1000.0  # N/m
+        
+        # Self-weight contribution
+        self_weight_kn_per_m = (self.beam.area_m2 * self.material.density_kg_m3 * 9.81) / 1000.0
+        total_q = q + (self_weight_kn_per_m * 1000.0)
+
+        # Maximum shear force (supports) V = q * L / 2
+        max_shear_n = (total_q * l) / 2.0
+
+        # Maximum bending moment (mid-span) M = q * L^2 / 8
+        max_moment_nm = (total_q * (l ** 2)) / 8.0
+
+        # Maximum bending stress sigma = M * y / I
+        c_m = (self.beam.depth_mm / 2.0) * 1e-3
+        ixx = self.beam.second_moment_of_area_ixx_m4
+        bending_stress_mpa = (max_moment_nm * c_m / ixx) / 1e6
+
+        # Maximum deflection delta = 5 * q * L^4 / (384 * E * I)
+        e_pa = self.material.elastic_modulus_gpa * 1e9
+        max_deflection_mm = (5.0 * total_q * (l ** 4) / (384.0 * e_pa * ixx)) * 1000.0
+
+        # Allowable deflection limit (L / 360 standard serviceability)
+        deflection_limit_mm = (l * 1000.0) / 360.0
+
+        safety_factor = (
+            self.material.yield_strength_mpa / bending_stress_mpa
+            if bending_stress_mpa > 0
+            else float("inf")
         )
 
-    def run_schedule(self) -> Tuple[int, List[str]]:
-        """Executes forward and backward passes. Returns project duration and critical path activities."""
-        # Forward pass (Early Start & Early Finish)
-        for act in self.activities.values():
-            if not act.dependencies:
-                act.early_start = 0
-            else:
-                act.early_start = max(self.activities[dep].early_finish for dep in act.dependencies)
-            act.early_finish = act.early_start + act.duration_days
-
-        project_duration = max(act.early_finish for act in self.activities.values())
-
-        # Backward pass (Late Start & Late Finish)
-        successors: Dict[str, List[str]] = {aid: [] for aid in self.activities}
-        for act in self.activities.values():
-            for dep in act.dependencies:
-                successors[dep].append(act.id)
-
-        # Reverse topological order
-        sorted_acts = sorted(self.activities.values(), key=lambda a: a.early_finish, reverse=True)
-        for act in sorted_acts:
-            if not successors[act.id]:
-                act.late_finish = project_duration
-            else:
-                act.late_finish = min(self.activities[succ].late_start for succ in successors[act.id])
-            act.late_start = act.late_finish - act.duration_days
-            act.total_float = act.late_start - act.early_start
-            act.is_critical = (act.total_float == 0)
-
-        critical_path = [aid for aid, act in self.activities.items() if act.is_critical]
-        return project_duration, critical_path
+        return {
+            "self_weight_kn_per_m": round(self_weight_kn_per_m, 3),
+            "total_design_load_kn_per_m": round(total_q / 1000.0, 3),
+            "max_shear_kn": round(max_shear_n / 1000.0, 2),
+            "max_moment_kn_m": round(max_moment_nm / 1000.0, 2),
+            "bending_stress_mpa": round(bending_stress_mpa, 2),
+            "yield_stress_mpa": self.material.yield_strength_mpa,
+            "safety_factor": round(safety_factor, 2),
+            "max_deflection_mm": round(max_deflection_mm, 2),
+            "deflection_limit_mm": round(deflection_limit_mm, 2),
+            "passes_strength": safety_factor >= 1.67,
+            "passes_deflection": max_deflection_mm <= deflection_limit_mm,
+        }
 
 
-# ============================================================================
-# VERIFICATION & PROOF-OF-WORK DEMONSTRATION
-# ============================================================================
+# =====================================================================
+# 2. Material Quantity Takeoff (MTO) & Cost Estimator
+# =====================================================================
 
-def main():
-    print("=================================================================")
-    print("CONSTRUCTION & ENGINEERING POW TOOLKIT - BUILD VERIFICATION #5")
-    print("=================================================================\n")
+class QuantityTakeoff:
+    """Computes engineering volume, mass, and procurement expenses."""
 
-    # 1. Structural Analysis Verification
-    print("[1] STRUCTURAL BEAM ANALYSIS (Simply Supported Beam Span = 8.0m)")
-    beam = StructuralBeamAnalyzer(length_m=8.0, e_gpa=200.0, i_cm4=8356.0)
-    beam.add_distributed_load(start_m=0.0, end_m=8.0, intensity_kn_per_m=15.0)  # 15 kN/m UDL
-    beam.add_point_load(position_m=4.0, magnitude_kn=45.0)                      # 45 kN Central Load
-    
-    results = beam.evaluate_beam()
-    for metric, val in results.items():
-        print(f"  • {metric}: {val}")
-    print()
+    @staticmethod
+    def compute_steel_member(beam: BeamGeometry, material: MaterialProperties) -> Dict[str, float]:
+        volume_m3 = beam.area_m2 * beam.length_m
+        total_mass_kg = volume_m3 * material.density_kg_m3
+        total_cost_usd = total_mass_kg * material.unit_cost_usd_per_kg
 
-    # 2. Material Takeoff Verification
-    print("[2] CONCRETE & REBAR TAKEOFF (12.0 m³ Slab Foundation - M25 Grade)")
-    takeoff = ConcreteTakeoffEstimator.calculate_mix_materials(wet_volume_m3=12.0, grade=ConcreteGrade.M25)
-    for mat, val in takeoff.items():
-        print(f"  • {mat}: {val}")
+        return {
+            "volume_m3": round(volume_m3, 4),
+            "total_mass_kg": round(total_mass_kg, 2),
+            "total_cost_usd": round(total_cost_usd, 2),
+        }
 
-    rebar_wt = ConcreteTakeoffEstimator.calculate_rebar_weight(diameter_mm=16.0, length_m=450.0)
-    print(f"  • rebar_weight_kg (16mm, 450m length): {rebar_wt} kg\n")
+    @staticmethod
+    def compute_reinforced_concrete_slab(
+        length_m: float,
+        width_m: float,
+        thickness_m: float,
+        concrete_cost_per_m3: float = 145.0,
+        rebar_ratio_percent: float = 1.2,
+        rebar_cost_per_kg: float = 1.10,
+    ) -> Dict[str, float]:
+        concrete_volume_m3 = length_m * width_m * thickness_m
+        concrete_cost = concrete_volume_m3 * concrete_cost_per_m3
 
-    # 3. Construction CPM Schedule Verification
-    print("[3] CPM PROJECT SCHEDULE (Site Execution Plan)")
-    cpm = CriticalPathMethodEngine()
-    cpm.add_activity("A", "Excavation & Earthwork", duration_days=5)
-    cpm.add_activity("B", "Foundation Footings", duration_days=7, dependencies=["A"])
-    cpm.add_activity("C", "Underground MEP Utilities", duration_days=4, dependencies=["A"])
-    cpm.add_activity("D", "RCC Column Structure", duration_days=10, dependencies=["B"])
-    cpm.add_activity("E", "Backfill & Slab-on-Grade", duration_days=6, dependencies=["B", "C"])
-    cpm.add_activity("F", "First Floor Slab Pour", duration_days=8, dependencies=["D", "E"])
+        # Steel rebar estimation (density = 7850 kg/m^3)
+        rebar_volume_m3 = concrete_volume_m3 * (rebar_ratio_percent / 100.0)
+        rebar_mass_kg = rebar_volume_m3 * 7850.0
+        rebar_cost = rebar_mass_kg * rebar_cost_per_kg
 
-    total_days, crit_path = cpm.run_schedule()
-    print(f"  • Project Total Duration: {total_days} Days")
-    print(f"  • Critical Path Sequence: {' -> '.join(crit_path)}")
-    print("\n  Task Details:")
-    for aid, act in cpm.activities.items():
-        crit_flag = " [CRITICAL]" if act.is_critical else ""
-        print(f"    - {act.id} ({act.description}): ES={act.early_start}d, EF={act.early_finish}d, "
-              f"Float={act.total_float}d{crit_flag}")
+        total_cost = concrete_cost + rebar_cost
 
-    print("\n[OK] Build #5 verification complete and validated.")
+        return {
+            "concrete_volume_m3": round(concrete_volume_m3, 3),
+            "concrete_cost_usd": round(concrete_cost, 2),
+            "rebar_mass_kg": round(rebar_mass_kg, 2),
+            "rebar_cost_usd": round(rebar_cost, 2),
+            "total_slab_cost_usd": round(total_cost, 2),
+        }
+
+
+# =====================================================================
+# 3. Cryptographic Proof-of-Work QA Audit Trail
+# =====================================================================
+
+@dataclass
+class InspectionBlock:
+    index: int
+    timestamp: float
+    record_type: str
+    data: Dict
+    previous_hash: str
+    nonce: int = 0
+    hash: str = ""
+
+    def calculate_hash(self) -> str:
+        serialized = json.dumps(
+            {
+                "index": self.index,
+                "timestamp": self.timestamp,
+                "record_type": self.record_type,
+                "data": self.data,
+                "previous_hash": self.previous_hash,
+                "nonce": self.nonce,
+            },
+            sort_keys=True,
+        )
+        return hashlib.sha256(serialized.encode("utf-8")).hexdigest()
+
+    def mine_proof_of_work(self, difficulty_prefix: str = "0000") -> None:
+        """Solves computational proof-of-work challenge to finalize QA record."""
+        self.nonce = 0
+        current_hash = self.calculate_hash()
+        while not current_hash.startswith(difficulty_prefix):
+            self.nonce += 1
+            current_hash = self.calculate_hash()
+        self.hash = current_hash
+
+
+class ConstructionAuditLedger:
+    """Tamper-evident ledger documenting project calculation milestones."""
+
+    def __init__(self, difficulty: str = "0000"):
+        self.difficulty = difficulty
+        self.chain: List[InspectionBlock] = []
+        self._init_genesis()
+
+    def _init_genesis(self) -> None:
+        genesis = InspectionBlock(
+            index=0,
+            timestamp=time.time(),
+            record_type="GENESIS_INSPECTION_ROOT",
+            data={"project": "Construction_and_Engineering_Build_Weekly_5", "status": "INITIALIZED"},
+            previous_hash="0" * 64,
+        )
+        genesis.mine_proof_of_work(self.difficulty)
+        self.chain.append(genesis)
+
+    def append_record(self, record_type: str, data: Dict) -> InspectionBlock:
+        prev = self.chain[-1]
+        block = InspectionBlock(
+            index=len(self.chain),
+            timestamp=time.time(),
+            record_type=record_type,
+            data=data,
+            previous_hash=prev.hash,
+        )
+        block.mine_proof_of_work(self.difficulty)
+        self.chain.append(block)
+        return block
+
+    def verify_integrity(self) -> bool:
+        for i in range(1, len(self.chain)):
+            curr = self.chain[i]
+            prev = self.chain[i - 1]
+            if curr.previous_hash != prev.hash:
+                return False
+            if curr.calculate_hash() != curr.hash:
+                return False
+            if not curr.hash.startswith(self.difficulty):
+                return False
+        return True
+
+
+# =====================================================================
+# 4. End-to-End Build Pipeline Execution
+# =====================================================================
+
+def execute_weekly_build_pipeline() -> Dict:
+    # 1. Structural Section: W310x38.7 (European IPE 300 equivalent)
+    w_beam = BeamGeometry(
+        length_m=6.5,
+        depth_mm=300.0,
+        width_mm=150.0,
+        flange_thickness_mm=10.7,
+        web_thickness_mm=7.1,
+    )
+
+    astm_a992_steel = MaterialProperties(
+        name="ASTM A992 Structural Steel",
+        yield_strength_mpa=345.0,
+        elastic_modulus_gpa=200.0,
+        density_kg_m3=7850.0,
+        unit_cost_usd_per_kg=1.45,
+    )
+
+    # 2. Run structural validation under 28 kN/m load
+    analyzer = StructuralAnalysis(beam=w_beam, material=astm_a992_steel)
+    structural_results = analyzer.calculate_distributed_load_capacity(distributed_load_kn_per_m=28.0)
+
+    # 3. Perform Material Takeoff (MTO)
+    mto_steel = QuantityTakeoff.compute_steel_member(beam=w_beam, material=astm_a992_steel)
+    mto_slab = QuantityTakeoff.compute_reinforced_concrete_slab(
+        length_m=6.5, width_m=3.0, thickness_m=0.15
+    )
+
+    # 4. Commit results to Cryptographic Proof-of-Work Ledger
+    ledger = ConstructionAuditLedger(difficulty="000")
+
+    b1 = ledger.append_record(
+        record_type="STRUCTURAL_INTEGRITY_CHECK",
+        data={
+            "beam_geometry": asdict(w_beam),
+            "material": asdict(astm_a992_steel),
+            "analysis_results": structural_results,
+        },
+    )
+
+    b2 = ledger.append_record(
+        record_type="MATERIAL_QUANTITY_TAKEOFF",
+        data={
+            "beam_takeoff": mto_steel,
+            "composite_slab_takeoff": mto_slab,
+            "total_estimated_package_usd": round(
+                mto_steel["total_cost_usd"] + mto_slab["total_slab_cost_usd"], 2
+            ),
+        },
+    )
+
+    is_valid = ledger.verify_integrity()
+
+    return {
+        "status": "BUILD_SUCCESSFUL",
+        "verified_tamper_evident": is_valid,
+        "blocks_mined": len(ledger.chain),
+        "structural_analysis": structural_results,
+        "material_takeoff": {
+            "steel_cost": mto_steel["total_cost_usd"],
+            "slab_cost": mto_slab["total_slab_cost_usd"],
+            "total_cost": round(mto_steel["total_cost_usd"] + mto_slab["total_slab_cost_usd"], 2),
+        },
+        "latest_block_hash": b2.hash,
+        "latest_nonce": b2.nonce,
+    }
 
 
 if __name__ == "__main__":
-    main()
+    report = execute_weekly_build_pipeline()
+    print(json.dumps(report, indent=2))
 ```
